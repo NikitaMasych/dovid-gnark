@@ -82,10 +82,11 @@ func main() {
 	fmt.Println("VERIFIER KEY LEN: ", len(verifierKeyData))
 	fmt.Println(verifierKeyData)
 
-	// "length of the proof" + proof + "length of the witness" + witness + verifier_key
-	input := intToBytes(uint32(len(proofData)))
+	// ec_id + "length of the proof" + proof + "length of the witness" + witness + verifier_key
+	input := uint16ToBytes(uint16(ecc.BN254))
+	input = append(input, uint32ToBytes(uint32(len(proofData)))...)
 	input = append(input, proofData...)
-	input = append(input, intToBytes(uint32(len(publicWitnessData)))...)
+	input = append(input, uint32ToBytes(uint32(len(publicWitnessData)))...)
 	input = append(input, publicWitnessData...)
 	input = append(input, verifierKeyData...)
 
@@ -96,7 +97,13 @@ func main() {
 	fmt.Println(hexInput)
 }
 
-func intToBytes(number uint32) []byte {
+func uint16ToBytes(number uint16) []byte {
+	byteArray := make([]byte, 2)
+	binary.BigEndian.PutUint16(byteArray, number)
+	return byteArray
+}
+
+func uint32ToBytes(number uint32) []byte {
 	byteArray := make([]byte, 4)
 	binary.BigEndian.PutUint32(byteArray, number)
 	return byteArray
