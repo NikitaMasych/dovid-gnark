@@ -1,218 +1,60 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
-	"encoding/hex"
-	"fmt"
+	"main/circuits"
+	"main/serialization"
+	"math/big"
+
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
-	"github.com/consensys/gnark/backend/witness"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/pkg/errors"
-	"math/big"
-	"os"
 )
 
-// TestCircuit0 defines a simple circuit
-// x**3 + x + 5 == y
-type TestCircuit0 struct {
-	// struct tags on a variable is optional
-	// default uses variable name and secret visibility.
-	X frontend.Variable `gnark:"x"`
-	Y frontend.Variable `gnark:",public"`
-}
-
-// TestCircuit1 defines a simple circuit
-// x**3 + x + 5 == y + z
-type TestCircuit1 struct {
-	// struct tags on a variable is optional
-	// default uses variable name and secret visibility.
-	X frontend.Variable `gnark:"x"`
-	Y frontend.Variable `gnark:",public"`
-	Z frontend.Variable `gnark:",public"`
-}
-
-// TestCircuit2 defines a simple circuit
-// x**3 + x + 5 == (y + z) * c
-type TestCircuit2 struct {
-	// struct tags on a variable is optional
-	// default uses variable name and secret visibility.
-	X frontend.Variable `gnark:"x"`
-	Y frontend.Variable `gnark:",public"`
-	Z frontend.Variable `gnark:",public"`
-	C frontend.Variable `gnark:",public"`
-}
-
-// Define declares the circuit constraints
-// x**3 + x + 5 == y
-func (circuit *TestCircuit0) Define(api frontend.API) error {
-	x3 := api.Mul(circuit.X, circuit.X, circuit.X)
-	api.AssertIsEqual(circuit.Y, api.Add(x3, circuit.X, 5))
-	return nil
-}
-
-// Define declares the circuit constraints
-// x**3 + x + 5 == y + z
-func (circuit *TestCircuit1) Define(api frontend.API) error {
-	x3 := api.Mul(circuit.X, circuit.X, circuit.X)
-	api.AssertIsEqual(api.Add(circuit.Y, circuit.Z), api.Add(x3, circuit.X, 5))
-	return nil
-}
-
-// Define declares the circuit constraints
-// x**3 + x + 5 == (y + z) * c
-func (circuit *TestCircuit2) Define(api frontend.API) error {
-	x3 := api.Mul(circuit.X, circuit.X, circuit.X)
-	temp := api.Add(circuit.Y, circuit.Z)
-	api.AssertIsEqual(api.Mul(temp, circuit.C), api.Add(x3, circuit.X, 5))
-	return nil
-}
-
 func main() {
-	// compiles our circuit into a R1CS
+	var (
+		circuit circuits.Poseidon
+		ecID    = ecc.BN254
+	)
 
-	var circuit TestCircuit0
-	//var circuit TestCircuit1
-	//var circuit TestCircuit2
-	ccs, _ := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, &circuit)
+	// ---------------- COMPILE CIRCUIT -------------------
+	ccs, err := frontend.Compile(ecID.ScalarField(), r1cs.NewBuilder, &circuit)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to compile circuit"))
+	}
 
-	// groth16 zkSNARK: Setup
-	pk, vk, _ := groth16.Setup(ccs)
+	// ---------------- SETUP PK AND VK --------------------
+	pk, vk, err := groth16.Setup(ccs)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to setup pk and vk"))
+	}
 
-	const verifySolidityPath = "artifacts/verifier_groth16.sol"
-	f, _ := os.OpenFile(verifySolidityPath, os.O_CREATE|os.O_WRONLY, 0666)
-	defer f.Close()
-	vk.ExportSolidity(f)
+	// ---------------- DEFINE WITNESS ----------
+	hashValue, _ := new(big.Int).SetString("13377623690824916797327209540443066247715962236839283896963055328700043345550", 0)
+	assignment := circuits.Poseidon{
+		Input: 111,
+		Hash:  hashValue,
+	}
+	wit, err := frontend.NewWitness(&assignment, ecID.ScalarField())
+	if err != nil {
+		panic(errors.Wrap(err, "failed to instantiate new witness"))
+	}
 
-	// witness definition
-	assignment := TestCircuit0{X: 3, Y: 35}
-	//assignment := TestCircuit1{X: 3, Y: 20, Z: 15}
-	//assignment := TestCircuit2{X: 3, Y: 2, Z: 5, C: 5}
-	witness, _ := frontend.NewWitness(&assignment, ecc.BN254.ScalarField())
-	publicWitness, _ := witness.Public()
+	// ---------------- MAKE PROOF -------------------
+	proof, err := groth16.Prove(ccs, pk, wit)
+	if err != nil {
+		panic(errors.Wrap(err, "failed to prove"))
+	}
 
-	// groth16: Prove & Verify
-
-	proof, _ := groth16.Prove(ccs, pk, witness)
+	// ----------------- VERIFY PROOF --------------------
+	publicWitness, err := wit.Public()
+	if err != nil {
+		panic(errors.Wrap(err, "failed to extract public witness"))
+	}
 	if err := groth16.Verify(proof, vk, publicWitness); err != nil {
 		panic(errors.Wrap(err, "failed to verify proof"))
 	}
 
-	//	----------- PUBLIC WITNESS -------------
-	buffer := &bytes.Buffer{}
-	if _, err := publicWitness.WriteTo(buffer); err != nil {
-		panic(errors.Wrap(err, "failed to write public witness to buffer"))
-	}
-	publicWitnessData := buffer.Bytes()
-	fmt.Println("PUBLIC WITNESS LEN: ", len(publicWitnessData))
-	fmt.Println(publicWitnessData)
-
-	// 	----------- PROOF -------------
-	buffer = &bytes.Buffer{}
-	if _, err := proof.WriteTo(buffer); err != nil {
-		panic(errors.Wrap(err, "failed to write proof to buffer"))
-	}
-	proofData := buffer.Bytes()
-	fmt.Println("PROOF LEN: ", len(proofData))
-	fmt.Println(proofData)
-
-	// 	----------- VERIFIER KEY -------------
-	buffer = &bytes.Buffer{}
-	if _, err := vk.WriteTo(buffer); err != nil {
-		panic(errors.Wrap(err, "failed to write verifier key to buffer"))
-	}
-	verifierKeyData := buffer.Bytes()
-	fmt.Println("VERIFIER KEY LEN: ", len(verifierKeyData))
-	fmt.Println(verifierKeyData)
-
-	// ec_id + "length of the witness" + witness + proof (128 bytes) + verifier_key
-	input := uint16ToBytes(uint16(ecc.BN254))
-	input = append(input, uint32ToBytes(uint32(len(publicWitnessData)))...)
-	input = append(input, publicWitnessData...)
-	input = append(input, proofData...)
-	input = append(input, verifierKeyData...)
-
-	fmt.Println("\n\n\n\nINPUT")
-	fmt.Println(input)
-
-	hexInput := hex.EncodeToString(input)
-	fmt.Println(hexInput)
-
-	fmt.Println("Len: ", len(input))
-
-	serializeForAutogeneratedContract(proof, witness, &circuit)
-}
-
-func uint16ToBytes(number uint16) []byte {
-	byteArray := make([]byte, 2)
-	binary.BigEndian.PutUint16(byteArray, number)
-	return byteArray
-}
-
-func uint32ToBytes(number uint32) []byte {
-	byteArray := make([]byte, 4)
-	binary.BigEndian.PutUint32(byteArray, number)
-	return byteArray
-}
-
-func serializeForAutogeneratedContract(proof groth16.Proof, witness witness.Witness, circuit frontend.Circuit) {
-	serializeProofForAutogeneratedContract(proof)
-	publicWitness, err := witness.Public()
-	if err != nil {
-		panic(errors.Wrap(err, "failed to extract public witness"))
-	}
-	serializePublicInputsForAutogeneratedContract(publicWitness, circuit)
-}
-
-func serializeProofForAutogeneratedContract(proof groth16.Proof) {
-	const fpSize = 32
-	buffer := &bytes.Buffer{}
-	if _, err := proof.WriteRawTo(buffer); err != nil {
-		panic(errors.Wrap(err, "failed to write proof to buffer"))
-	}
-	proofData := buffer.Bytes()
-
-	var a [2]*big.Int
-	a[0] = big.NewInt(0).SetBytes(proofData[fpSize*0 : fpSize*1])
-	a[1] = big.NewInt(0).SetBytes(proofData[fpSize*1 : fpSize*2])
-
-	var b [2][2]*big.Int
-	b[0][0] = big.NewInt(0).SetBytes(proofData[fpSize*2 : fpSize*3])
-	b[0][1] = big.NewInt(0).SetBytes(proofData[fpSize*3 : fpSize*4])
-	b[1][0] = big.NewInt(0).SetBytes(proofData[fpSize*4 : fpSize*5])
-	b[1][1] = big.NewInt(0).SetBytes(proofData[fpSize*5 : fpSize*6])
-
-	var c [2]*big.Int
-	c[0] = big.NewInt(0).SetBytes(proofData[fpSize*6 : fpSize*7])
-	c[1] = big.NewInt(0).SetBytes(proofData[fpSize*7 : fpSize*8])
-
-	fmt.Printf("%v\n", a)
-	fmt.Printf("%v\n", b)
-	fmt.Printf("%v\n", c)
-}
-
-func serializePublicInputsForAutogeneratedContract(publicWitness witness.Witness, circuit frontend.Circuit) {
-	schema, err := frontend.NewSchema(circuit)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to init new schema"))
-	}
-	publicWitnessJson, err := publicWitness.ToJSON(schema)
-	if err != nil {
-		panic(errors.Wrap(err, "failed to transform to json"))
-	}
-
-	// Save publicWitness
-	const publicWitnessPath = "artifacts/public.json"
-	publicWitnessFile, _ := os.OpenFile(publicWitnessPath, os.O_CREATE|os.O_WRONLY, 0666)
-	defer func(publicWitnessFile *os.File) {
-		if err := publicWitnessFile.Close(); err != nil {
-			panic(errors.Wrap(err, "failed to close public witness file"))
-		}
-	}(publicWitnessFile)
-
-	if _, err := publicWitnessFile.Write(publicWitnessJson); err != nil {
-		panic(errors.Wrap(err, "failed to write public witness json"))
-	}
+	serialization.SerializeAndPrintForGroth16Precompile(proof, vk, wit)
 }
