@@ -1,25 +1,25 @@
 package main
 
 import (
-	"main/circuits"
-	"main/serialization"
-	"math/big"
-
+	"bytes"
+	"fmt"
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/pkg/errors"
+	"main/circuits"
 )
 
 func main() {
 	var (
-		circuit circuits.Poseidon
-		ecID    = ecc.BN254
+		ecID = ecc.BN254
 	)
 
+	circuit, assignment := circuits.SampleZKMessage()
+
 	// ---------------- COMPILE CIRCUIT -------------------
-	ccs, err := frontend.Compile(ecID.ScalarField(), r1cs.NewBuilder, &circuit)
+	ccs, err := frontend.Compile(ecID.ScalarField(), r1cs.NewBuilder, circuit)
 	if err != nil {
 		panic(errors.Wrap(err, "failed to compile circuit"))
 	}
@@ -31,12 +31,7 @@ func main() {
 	}
 
 	// ---------------- DEFINE WITNESS ----------
-	hashValue, _ := new(big.Int).SetString("13377623690824916797327209540443066247715962236839283896963055328700043345550", 0)
-	assignment := circuits.Poseidon{
-		Input: 111,
-		Hash:  hashValue,
-	}
-	wit, err := frontend.NewWitness(&assignment, ecID.ScalarField())
+	wit, err := frontend.NewWitness(assignment, ecID.ScalarField())
 	if err != nil {
 		panic(errors.Wrap(err, "failed to instantiate new witness"))
 	}
@@ -56,5 +51,30 @@ func main() {
 		panic(errors.Wrap(err, "failed to verify proof"))
 	}
 
-	serialization.SerializeAndPrintForGroth16Precompile(proof, vk, wit)
+	buffer := new(bytes.Buffer)
+
+	if _, err := proof.WriteTo(buffer); err != nil {
+		panic(errors.Wrap(err, "failed to write proof to buffer"))
+	}
+	proofData := buffer.Bytes()
+
+	buffer.Reset()
+
+	if _, err := vk.WriteTo(buffer); err != nil {
+		panic(errors.Wrap(err, "failed to write vk to buffer"))
+	}
+	verifierKeyData := buffer.Bytes()
+
+	buffer.Reset()
+
+	if _, err := publicWitness.WriteTo(buffer); err != nil {
+		panic(errors.Wrap(err, "failed to write public witness to buffer"))
+	}
+	publicWitnessData := buffer.Bytes()
+
+	if err := groth16.Verify(proof, vk, publicWitness); err != nil {
+		panic(errors.Wrap(err, "failed to verify proof | serialized"))
+	}
+
+	fmt.Println(proofData, verifierKeyData, publicWitnessData)
 }
